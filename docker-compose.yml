@@ -1,0 +1,35 @@
+version: "3.9"
+services:
+  web:
+    build:
+      context: .
+      dockerfile: ./nginx/Dockerfile
+    ports:
+      - "80:80"
+    depends_on:
+      - api
+
+  api:
+    build:
+      context: ./backend
+      args:
+        HTTP_PROXY:  http://host.docker.internal:7890
+        HTTPS_PROXY: http://host.docker.internal:7890
+        NO_PROXY:    localhost,127.0.0.1,api,web
+    environment:
+      HTTP_PROXY:  http://host.docker.internal:7890
+      HTTPS_PROXY: http://host.docker.internal:7890
+      NO_PROXY:    localhost,127.0.0.1,api,web
+      DEFAULT_FONT_FILE: /app/app/fonts/NotoSansCJK-Regular.ttf
+      HF_HOME: /hf_cache
+      TRANSFORMERS_CACHE: /hf_cache
+      TORCH_HOME: /hf_cache
+    volumes:
+      - hf_cache:/hf_cache
+      - /f/creat/pdf-translator/fonts-host:/app/app/fonts:ro
+
+    expose:
+      - "8000"
+
+volumes:
+  hf_cache:

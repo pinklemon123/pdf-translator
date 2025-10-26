@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PDF 英译中翻译器</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pdfjs-dist@4.6.82/web/pdf_viewer.css" />
+  <!-- Use relative paths so opening index.html directly (file://) still finds the CSS/JS -->
+  <link rel="stylesheet" href="src/App.css" />
+    <!-- Inline tiny SVG favicon to avoid 404 when no favicon.ico exists -->
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%230f172a'/%3E%3Ctext x='8' y='10' font-size='9' fill='%23ffffff' text-anchor='middle'%3EP%3C/text%3E%3C/svg%3E">
+  </head>
+  <body>
+    <div class="app-root">
+      <div class="app-container">
+        <header class="app-header">
+          <h1 class="app-title">
+            PDF 英译中翻译器 <span class="app-title-note">(前端界面 · MVP)</span>
+          </h1>
+          <span class="app-xs-muted">English → Chinese only</span>
+        </header>
+
+        <section class="app-grid">
+          <div class="left-col">
+            <div class="card">
+              <h2 class="section-title">1) 选择 PDF（英文）</h2>
+              <input id="inp-pdf" type="file" accept="application/pdf" class="file-input" />
+              <p id="meta-pages" class="muted small" style="display:none"></p>
+
+              <div class="sep"></div>
+
+              <h2 class="section-title">2) 固定方向</h2>
+              <div class="badge">
+                <span class="badge-strong">EN → ZH</span>
+                <span class="muted">(不可更改)</span>
+              </div>
+
+              <div class="sep"></div>
+
+              <h2 class="section-title">3) 参数</h2>
+              <label class="label" for="range-dpi">背景渲染 DPI（影响版式保真度与文件体积）</label>
+              <input id="range-dpi" type="range" min="96" max="216" step="12" value="144" class="range" />
+              <div class="muted small">当前：<span id="txt-dpi">144</span> DPI</div>
+
+              <label class="label" for="range-batch">翻译批大小（显存/内存不足可调小）</label>
+              <input id="range-batch" type="range" min="4" max="32" step="1" value="12" class="range" />
+              <div class="muted small">当前：<span id="txt-batch">12</span></div>
+
+              <label class="label" for="inp-font">可选字体（TTF，建议 NotoSansCJK）</label>
+              <input id="inp-font" type="file" accept=".ttf" class="file-input" />
+
+              <button id="btn-translate" class="btn btn-primary" disabled title="请先选择 PDF">
+                开始翻译（英→中）
+              </button>
+
+              <div class="muted small note">
+                * 将向 <code class="inline-code">/api/translate</code> 发送表单：pdf、direction=en2zh、dpi、batch_size、font_ttf
+              </div>
+
+              <div class="progress-area" id="progress-area"></div>
+            </div>
+          </div>
+
+          <div class="right-col">
+            <div class="card">
+              <div class="card-header">
+                <h2 class="section-title">页面预览（前 1–2 页）</h2>
+                <span id="txt-rendering" class="muted small" style="display:none">渲染中…</span>
+              </div>
+              <div id="txt-render-error" class="text error" style="display:none"></div>
+              <div id="preview" class="preview-container"></div>
+              <div id="placeholder" class="muted text">选择一个英文 PDF 文件后，将在此处展示前几页的预览。</div>
+            </div>
+          </div>
+        </section>
+
+        <footer class="app-footer">
+          前端仅做上传与预览。英→中翻译与版式重建在后端完成。建议使用 Python FastAPI 实现
+          <code class="inline-code">/api/translate</code> 接口（可参考 PyMuPDF + Transformers 的示例脚本）。
+          返回 <code class="inline-code">application/pdf</code> 二进制流即可。
+        </footer>
+      </div>
+    </div>
+
+    <script type="module" src="src/app.js"></script>
+  </body>
+</html>
