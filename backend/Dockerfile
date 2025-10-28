@@ -1,5 +1,42 @@
 FROM python:3.11-slim
 
+# Install system deps required for some Python packages (OpenCV, Pillow, easyocr)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    wget \
+    git \
+    ca-certificates \
+    libgl1 \
+    libglib2.0-0 \
+    poppler-utils \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy requirements first to leverage Docker layer caching
+COPY requirements.txt ./
+
+# Use pip to install requirements
+RUN python -m pip install --upgrade pip setuptools wheel \
+ && pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY . /app
+
+ENV PYTHONUNBUFFERED=1
+
+# Create a non-root user for better security
+RUN groupadd -r appuser && useradd --no-log-init -r -g appuser appuser \
+ && chown -R appuser:appuser /app
+
+USER appuser
+
+# Expose default port
+EXPOSE 8000
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+FROM python:3.11-slim
+
 # ==== 可选：接收构建期代理（build-args） ====
 ARG HTTP_PROXY
 ARG HTTPS_PROXY

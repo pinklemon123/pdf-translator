@@ -1,0 +1,10 @@
+venv
+__pycache__
+*.pyc
+.cache_trans
+*.log
+*.sqlite3
+build
+dist
+*.egg-info
+/.git

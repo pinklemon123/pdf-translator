@@ -1,0 +1,309 @@
+太好了！给你一套「一站式多模态翻译器」的最小可用架构，在你现有项目上平滑扩展：支持 PDF（保版式）+ 截图/图片 + 网页 三条线路，统一前端入口，统一后台缓存与模型。
+
+1) 架构一图流
+前端（单页）：
+  选项卡：PDF｜图片｜网页
+     │                 │
+     ▼                 ▼
+后端 FastAPI：
+  /api/translate_pdf     —— PyMuPDF 提取 → 批翻译 → 背景栅格化+中文回填（你已有，保留）
+  /api/translate_image   —— OCR(PaddleOCR) → 批翻译 → 覆盖写字（返回 PNG/JPEG）
+  /api/translate_html    —— 纯 HTML 文本节点翻译（返回 HTML）
+  /api/fetch_and_translate?url=... —— 抓取页面(可选 Playwright) → DOM 翻译
+公共：翻译引擎(Transformers)｜缓存(diskcache)｜队列(可选 RQ/Celery)｜GPU/CPU 自适应
+
+2) 目录（在你仓库基础上新增）
+pdf-translator/
+├─ backend/
+│  ├─ app/
+│  │  ├─ main.py                  # 新增路由：image/html
+│  │  ├─ translator_pdf.py        # 你现有 PDF 流水线（保留/拆分）
+│  │  ├─ translator_image.py      # 图片：OCR+回写
+│  │  ├─ translator_html.py       # 网页：DOM 遍历翻译
+│  │  ├─ nlp.py                   # 模型加载/批翻译（公用）
+│  │  ├─ ocr.py                   # OCR 封装（PaddleOCR）
+│  │  ├─ cache.py                 # diskcache 简易缓存（可按文本句子缓存）
+│  │  └─ utils.py                 # 通用：分句、清洗、字体、bbox 工具
+│  └─ requirements.txt            # 加 paddleocr、bs4、diskcache ...
+├─ frontend/
+│  ├─ index.html                  # 增加三个 tab
+│  └─ src/
+│     ├─ app.js                   # 增加 /api/translate_image /api/translate_html 调用
+│     └─ App.css
+└─ nginx/ ...（如需）
+
+3) 依赖（在你已有基础上补齐）
+
+backend/requirements.txt 增补：
+
+paddleocr>=2.7.0
+opencv-python-headless>=4.10.0.84
+Pillow>=10.2.0
+beautifulsoup4>=4.12.3
+readability-lxml>=0.8.1     # 可选：正文抽取更干净
+httpx>=0.27.0               # 网页抓取
+diskcache>=5.6.3            # 句级缓存
+sacremoses>=0.1.1           # 去掉 Marian 警告
+
+
+你已有：fastapi、uvicorn、pymupdf、transformers、torch、sentencepiece、python-multipart…
+
+4) 公用翻译引擎（app/nlp.py）
+# nlp.py
+import torch
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+
+_MODEL = "Helsinki-NLP/opus-mt-en-zh"
+_tok = _mdl = _dev = None
+
+def get_mt():
+    global _tok, _mdl, _dev
+    if _mdl is None:
+        _tok = AutoTokenizer.from_pretrained(_MODEL)
+        _mdl = AutoModelForSeq2SeqLM.from_pretrained(_MODEL)
+        _dev = "cuda" if torch.cuda.is_available() else "cpu"
+        _mdl = _mdl.to(_dev)
+    return _tok, _mdl, _dev
+
+def translate_batch(texts, max_new=512, batch_size=16):
+    tok, mdl, dev = get_mt()
+    outs = []
+    with torch.inference_mode():
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:i+batch_size]
+            enc = tok(batch, return_tensors="pt", padding=True, truncation=True).to(dev)
+            gen = mdl.generate(**enc, max_new_tokens=max_new, num_beams=4)
+            outs += tok.batch_decode(gen, skip_special_tokens=True)
+    return outs
+
+5) 句级缓存（app/cache.py）
+# cache.py
+from diskcache import Cache
+_cache = Cache(".cache_trans")
+
+def get(key: str): return _cache.get(key)
+def set_(key: str, val, expire=60*60*24*7): _cache.set(key, val, expire=expire)
+
+def translate_with_cache(texts, translate_fn):
+    res = []
+    missing, idx = [], []
+    for i, t in enumerate(texts):
+        v = get(t)
+        if v is None:
+            idx.append(i); missing.append(t)
+        else:
+            res.append((i, v))
+    if missing:
+        got = translate_fn(missing)
+        for i, t, tr in zip(idx, missing, got):
+            set_(t, tr)
+            res.append((i, tr))
+    return [v for _, v in sorted(res, key=lambda x: x[0])]
+
+6) 图片：OCR + 回写（app/translator_image.py）
+# translator_image.py
+import cv2, numpy as np
+from PIL import Image, ImageDraw, ImageFont
+from .ocr import get_ocr
+from .nlp import translate_batch
+from .cache import translate_with_cache
+
+def translate_image_bytes(img_bytes: bytes, font_path: str | None):
+    arr = np.frombuffer(img_bytes, np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)  # BGR
+    h, w = img.shape[:2]
+
+    ocr = get_ocr()
+    res = ocr.ocr(img, cls=True)
+    lines = []
+    boxes = []
+
+    for line in (res[0] or []):
+        box = np.array(line[0], dtype=np.int32)  # 4点
+        text = line[1][0].strip()
+        if text:
+            boxes.append(box)
+            lines.append(text)
+
+    if not lines:
+        _, buf = cv2.imencode(".png", img)
+        return buf.tobytes()
+
+    zh = translate_with_cache(lines, translate_batch)
+
+    # 覆盖写中文（白底 + 黑字）
+    pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil)
+    font = ImageFont.truetype(font_path, 24) if font_path else ImageFont.load_default()
+
+    for box, t in zip(boxes, zh):
+        x0, y0 = box.min(axis=0)
+        x1, y1 = box.max(axis=0)
+        # 白底
+        draw.rectangle([x0, y0, x1, y1], fill=(255,255,255))
+        # 自适应小调整
+        draw.text((x0+2, y0+1), t, fill=(0,0,0), font=font)
+
+    out = cv2.cvtColor(np.asarray(pil), cv2.COLOR_RGB2BGR)
+    ok, buf = cv2.imencode(".png", out)
+    return buf.tobytes()
+
+
+app/ocr.py:
+
+# ocr.py
+from paddleocr import PaddleOCR
+_ocr = None
+def get_ocr():
+    global _ocr
+    if _ocr is None:
+        _ocr = PaddleOCR(use_angle_cls=True, lang="en")  # 可改为 'en'/'ch'
+    return _ocr
+
+7) 网页：DOM 翻译（app/translator_html.py）
+
+简化实现：仅翻译可见文本节点，不动标签属性；可增加“黑名单标签”（script/style/noscript等）。
+
+# translator_html.py
+from bs4 import BeautifulSoup, NavigableString
+from .nlp import translate_batch
+from .cache import translate_with_cache
+
+_SKIP_PARENTS = {"script","style","noscript","code","pre","kbd"}
+
+def translate_html(html: str) -> str:
+    soup = BeautifulSoup(html, "html.parser")
+    texts, nodes = [], []
+
+    for node in soup.find_all(string=True):
+        if not isinstance(node, NavigableString): continue
+        s = (node or "").strip()
+        if not s: continue
+        p = node.parent.name.lower() if node.parent else ""
+        if p in _SKIP_PARENTS: continue
+        texts.append(s); nodes.append(node)
+
+    if not texts: return str(soup)
+
+    zh = translate_with_cache(texts, translate_batch)
+    for node, t in zip(nodes, zh):
+        node.replace_with(t)
+
+    return str(soup)
+
+8) 路由（在你的 app/main.py 追加）
+from fastapi import FastAPI, File, UploadFile, Form, Response
+from fastapi.middleware.cors import CORSMiddleware
+from .translator_pdf import translate_pdf_en2zh
+from .translator_image import translate_image_bytes
+from .translator_html import translate_html
+import httpx
+
+app = FastAPI(title="Multi-Modal Translator")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://127.0.0.1:8080","http://localhost:8080"],
+    allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
+)
+
+# 1) PDF（保留你现有的，路由名可维持 /api/translate）
+@app.post("/api/translate_pdf")
+async def api_translate_pdf(
+    pdf: UploadFile = File(...),
+    dpi: int = Form(180), batch_size: int = Form(12),
+    direction: str = Form("en2zh"),
+    font_ttf: UploadFile | None = File(None),
+):
+    fb = await font_ttf.read() if font_ttf else None
+    pdf_bytes = await pdf.read()
+    out = await translate_pdf_en2zh(pdf_bytes, dpi=dpi, batch_size=batch_size, font_bytes=fb)
+    return Response(
+        content=out, media_type="application/pdf",
+        headers={
+            "Content-Disposition": 'attachment; filename="translated.pdf"',
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache", "Expires": "0",
+        },
+    )
+
+# 2) 图片
+@app.post("/api/translate_image")
+async def api_translate_image(
+    image: UploadFile = File(...),
+    font_path: str = Form("backend/app/fonts/NotoSansCJK-Regular.ttf"),
+):
+    img = await image.read()
+    out = translate_image_bytes(img, font_path)
+    return Response(content=out, media_type="image/png",
+                    headers={"Cache-Control":"no-store"})
+
+# 3) 网页（上传 HTML）
+@app.post("/api/translate_html")
+async def api_translate_html(html: UploadFile = File(...)):
+    data = await html.read()
+    out = translate_html(data.decode("utf-8", errors="ignore"))
+    return Response(content=out.encode("utf-8"), media_type="text/html; charset=utf-8",
+                    headers={"Cache-Control":"no-store"})
+
+# 4) 网页（在线抓取并翻译）
+@app.get("/api/fetch_and_translate")
+async def api_fetch_and_translate(url: str):
+    async with httpx.AsyncClient(follow_redirects=True, timeout=30) as s:
+        r = await s.get(url, headers={"User-Agent":"Mozilla/5.0"})
+        r.raise_for_status()
+        html = r.text
+    out = translate_html(html)
+    return Response(content=out.encode("utf-8"), media_type="text/html; charset=utf-8",
+                    headers={"Cache-Control":"no-store"})
+
+
+你原来的 /api/translate 还能保留对 PDF 的兼容，或重定向到 /api/translate_pdf。
+
+9) 前端改动要点（很小）
+
+顶部加三个 Tab：PDF（表单同现在）｜图片（<input type="file" accept="image/*">）｜网页（文本框输入 URL / 上传 .html）。
+
+分别调用：
+
+POST /api/translate_pdf（返回 application/pdf → blob → 下载）
+
+POST /api/translate_image（返回 image/png → <img src=blob:...> 预览 + 下载）
+
+GET /api/fetch_and_translate?url=...（返回 text/html → 新开标签预览；或 POST /api/translate_html 上传 HTML 文件）
+
+仍然使用 cache: "no-store"，每次 URL.revokeObjectURL 旧 blob URL，download="translated.pdf" 固定文件名避免误打开旧文件。
+
+10) 论文级稳定性小贴士
+
+分段而不是逐小块：PDF 用“按段落/列”的聚合；图片 OCR 也可按行合并同一行的字块。
+
+超长段落分句：句号/分号/连接词分割后再批量翻译，能提速也更稳。
+
+缓存：句级缓存可显著加速多页重复短语（参考文献/图表标题）。
+
+DPI：PDF 背景 180–200，图片写字字体 20–28 更清晰。
+
+GPU：有 GPU 则批大小提到 32–64；CPU 则 8–16。
+
+长文本模型（后续可换）：比如 NLLB-200、M2M-100、或本地大语言模型（qwen2/DeepSeek CTranslate2 推理）。
+
+一次性可做的小任务清单
+
+pip install 增补依赖
+
+新增 app/nlp.py | cache.py | ocr.py | translator_image.py | translator_html.py
+
+main.py 挂 3 个新端点
+
+前端加 3 个按钮/Tab 调用对应端点
+
+用三条命令验证：
+
+curl -F "pdf=@a.pdf" -F "direction=en2zh" http://127.0.0.1:8000/api/translate_pdf -o out.pdf
+
+curl -F "image=@a.png" http://127.0.0.1:8000/api/translate_image -o out.png
+
+curl "http://127.0.0.1:8000/api/fetch_and_translate?url=https://example.com" -o out.html
+
+如果你把现在的 main.py 贴我（或我上面这段你直接覆盖），我就按你仓库路径给你完整可替换版；前端我也可以给你一段最简单的 tabs + 三个表单的 JS/HTML（不引入框架）。

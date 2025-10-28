@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>PDF 英译中翻译器</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pdfjs-dist@4.6.82/web/pdf_viewer.css" />
-  <!-- Use relative paths so opening index.html directly (file://) still finds the CSS/JS -->
-  <link rel="stylesheet" href="src/App.css" />
+  <!-- Use explicit /static/ paths so assets are always requested from the mounted static directory -->
+  <link rel="stylesheet" href="/static/src/App.css" />
     <!-- Inline tiny SVG favicon to avoid 404 when no favicon.ico exists -->
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%230f172a'/%3E%3Ctext x='8' y='10' font-size='9' fill='%23ffffff' text-anchor='middle'%3EP%3C/text%3E%3C/svg%3E">
   </head>
@@ -82,6 +82,6 @@
       </div>
     </div>
 
-    <script type="module" src="src/app.js"></script>
+    <script type="module" src="/static/src/app.js"></script>
   </body>
 </html>

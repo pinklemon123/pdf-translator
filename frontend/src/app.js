@@ -35,6 +35,8 @@ const txtRenderError = el("txt-render-error");
 let currentFile = null;
 let currentURL = null;
 let rendering = false;
+// Keep track of last blob URL so we can revoke it before creating a new one
+let lastObjectUrl = null;
 
 function setBusy(b) {
   rendering = b;
@@ -123,16 +125,41 @@ btnTranslate.addEventListener("click", async () => {
   if (inpFont.files && inpFont.files[0]) form.append("font_ttf", inpFont.files[0]);
 
   try {
-    // 改为本地后端地址以便直接联通测试（按你要求）
-    const res = await fetch("http://localhost:8000/api/translate", { method: "POST", body: form });
+  // 改为本地后端地址以便直接联通测试（使用 127.0.0.1 避免 localhost/127.0.0.1 不一致导致的 CORS 问题）
+  const res = await fetch("http://127.0.0.1:8000/api/translate", { method: "POST", body: form, cache: "no-store" });
     if (!res.ok) {
       const text = await res.text();
       throw new Error(text || `HTTP ${res.status}`);
     }
     progressArea.innerHTML = `<div class="text">服务器处理中…</div>`;
-    const blob = await res.blob();
-    const dlURL = URL.createObjectURL(blob);
-    progressArea.innerHTML = `<a class="btn btn-success" download href="${dlURL}">下载已翻译 PDF</a>`;
+  const blob = await res.blob();
+  const dlURL = URL.createObjectURL(blob);
+  // try to obtain filename from Content-Disposition header
+  const disposition = res.headers.get("Content-Disposition") || "";
+  let filename = "translated.pdf";
+  const m = /filename="?([^";]+)"?/.exec(disposition);
+  if (m && m[1]) filename = m[1];
+  console.log(`Downloaded blob size=${blob.size}, using filename=${filename}`);
+    // revoke prior blob URL to avoid pointing to stale content
+    if (lastObjectUrl) {
+      try { URL.revokeObjectURL(lastObjectUrl); } catch (e) {}
+      lastObjectUrl = null;
+    }
+    progressArea.innerHTML = `<a id="dl-link" class="btn btn-success" download="${filename}" href="${dlURL}">下载已翻译 PDF</a>`;
+    lastObjectUrl = dlURL;
+    // 自动触发下载（在用户点击事件处理器内触发，浏览器通常允许同源的用户发起的点击）
+    try {
+      const dl = document.getElementById('dl-link');
+      dl.click();
+    } catch (e) {
+      console.warn('Auto-download failed, please click the link to download.', e);
+    }
+    // revoke blob on page unload to avoid leaking object URLs
+    window.addEventListener('beforeunload', () => {
+      if (lastObjectUrl) {
+        try { URL.revokeObjectURL(lastObjectUrl); } catch (e) {}
+      }
+    });
   } catch (e) {
     console.error(e);
     progressArea.innerHTML = `<div class="text error">${e?.message || String(e)}</div>`;
